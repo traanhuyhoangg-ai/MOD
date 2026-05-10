@@ -1,0 +1,150 @@
+package com.nametagmod;
+
+import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.util.Hand;
+import net.minecraft.util.hit.EntityHitResult;
+import net.minecraft.util.hit.HitResult;
+import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Vec3d;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.List;
+
+public class NameTagAutoMod implements ClientModInitializer {
+
+    public static final Logger LOGGER = LoggerFactory.getLogger("nametagauto");
+
+    // Khoảng cách quét entity xung quanh người chơi (block)
+    private static final double SCAN_RANGE = 5.0;
+
+    // Cooldown giữa các lần tương tác (ticks) - 20 ticks = 1 giây
+    private static final int INTERACT_COOLDOWN = 20;
+
+    private int cooldownTimer = 0;
+
+    @Override
+    public void onInitializeClient() {
+        LOGGER.info("[NameTag Auto] Mod da khoi dong!");
+
+        ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            if (client.player == null || client.world == null) return;
+
+            // Giảm cooldown timer
+            if (cooldownTimer > 0) {
+                cooldownTimer--;
+                return;
+            }
+
+            ClientPlayerEntity player = client.player;
+
+            // Kiểm tra xem người chơi có đang cầm Name Tag không (tay chính hoặc tay phụ)
+            ItemStack mainHand = player.getMainHandStack();
+            ItemStack offHand = player.getOffHandStack();
+
+            boolean holdingNameTag = mainHand.isOf(Items.NAME_TAG) || offHand.isOf(Items.NAME_TAG);
+
+            if (!holdingNameTag) return;
+
+            // Kiểm tra Name Tag có tên chưa (phải đặt tên trước ở đe)
+            ItemStack nameTagStack = mainHand.isOf(Items.NAME_TAG) ? mainHand : offHand;
+            if (!nameTagStack.hasCustomName()) {
+                // Name tag chưa có tên - không làm gì
+                return;
+            }
+
+            // Phương thức 1: Kiểm tra entity mà người chơi đang nhìn vào (crosshair)
+            HitResult hitResult = client.crosshairTarget;
+            if (hitResult instanceof EntityHitResult entityHit) {
+                Entity target = entityHit.getEntity();
+                if (isValidTarget(target, player)) {
+                    interactWithEntity(client, target, nameTagStack.isOf(mainHand.getItem()) ? Hand.MAIN_HAND : Hand.OFF_HAND);
+                    cooldownTimer = INTERACT_COOLDOWN;
+                    return;
+                }
+            }
+
+            // Phương thức 2: Quét entity trong phạm vi gần (không dùng aura - chỉ quét thẳng)
+            // Tìm entity gần nhất trong đường ngắm của người chơi
+            Entity closestEntity = findEntityInLookDirection(client, player);
+            if (closestEntity != null) {
+                Hand hand = mainHand.isOf(Items.NAME_TAG) ? Hand.MAIN_HAND : Hand.OFF_HAND;
+                interactWithEntity(client, closestEntity, hand);
+                cooldownTimer = INTERACT_COOLDOWN;
+            }
+        });
+    }
+
+    /**
+     * Tìm entity trong hướng người chơi đang nhìn, trong phạm vi SCAN_RANGE
+     * KHÔNG xoay camera - chỉ kiểm tra entity trong hướng nhìn hiện tại
+     */
+    private Entity findEntityInLookDirection(MinecraftClient client, ClientPlayerEntity player) {
+        Vec3d eyePos = player.getEyePos();
+        Vec3d lookVec = player.getRotationVec(1.0f);
+        Vec3d endPos = eyePos.add(lookVec.multiply(SCAN_RANGE));
+
+        // Tạo bounding box bao quanh đường nhìn
+        Box searchBox = new Box(eyePos, endPos).expand(1.0);
+
+        List<Entity> nearbyEntities = client.world.getEntitiesByClass(
+            LivingEntity.class,
+            searchBox,
+            entity -> isValidTarget(entity, player)
+        );
+
+        Entity closest = null;
+        double closestDist = Double.MAX_VALUE;
+
+        for (Entity entity : nearbyEntities) {
+            // Kiểm tra entity có trong tầm nhìn (góc 30 độ từ hướng nhìn)
+            Vec3d toEntity = entity.getPos().subtract(eyePos).normalize();
+            double dot = lookVec.dotProduct(toEntity);
+
+            // dot > 0.866 tương đương góc < 30 độ
+            if (dot > 0.866) {
+                double dist = player.squaredDistanceTo(entity);
+                if (dist < closestDist) {
+                    closestDist = dist;
+                    closest = entity;
+                }
+            }
+        }
+
+        return closest;
+    }
+
+    /**
+     * Kiểm tra entity có hợp lệ để đặt tên không
+     */
+    private boolean isValidTarget(Entity entity, PlayerEntity player) {
+        if (entity == null) return false;
+        if (entity == player) return false;            // Không tự đặt tên mình
+        if (entity instanceof PlayerEntity) return false; // Không đặt tên người chơi khác
+        if (!(entity instanceof LivingEntity)) return false; // Chỉ LivingEntity
+        return true;
+    }
+
+    /**
+     * Thực hiện right-click vào entity để đặt tên
+     */
+    private void interactWithEntity(MinecraftClient client, Entity entity, Hand hand) {
+        if (client.interactionManager == null || client.player == null) return;
+
+        // Gửi packet tương tác với entity (tương đương right-click)
+        client.interactionManager.interactEntity(client.player, entity, hand);
+        client.player.swingHand(hand);
+
+        LOGGER.info("[NameTag Auto] Da dat ten cho entity: {} ({})",
+            entity.getType().getName().getString(),
+            entity.getUuidAsString().substring(0, 8));
+    }
+}
